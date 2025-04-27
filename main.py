@@ -1,194 +1,161 @@
 import os
-import json
-from fastapi import FastAPI, Depends, HTTPException, status
-from fastapi.security import APIKeyHeader
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Dict, List
-import requests
-from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
-import logging
+from typing import List
+
+import httpx
+from fastapi import FastAPI
+from pydantic import BaseModel
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # API credentials from environment variables
 API_KEY = os.getenv("API_KEY")
 OPENAI_ENDPOINT = os.getenv("OPENAI_ENDPOINT")
 MODEL = os.getenv("MODEL")
 
-# Store for notifications
-notifications_store = []
-
-# FastAPI app
-app = FastAPI(title="Dating Quote Notification API")
-
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# API key security
-api_key_header = APIKeyHeader(name="X-API-Key")
-
-def verify_api_key(api_key: str = Depends(api_key_header)):
-    """Verify the API key."""
-    if api_key != API_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API Key"
-        )
-    return api_key
-
-# Models
-class Quote(BaseModel):
-    """Quote model."""
-    content: str
-    created_at: str
-
-class Schedule(BaseModel):
-    """Schedule model for setting notification timing."""
-    time: str  # Format: "HH:MM" in 24-hour format
-
-class ScheduleResponse(BaseModel):
-    """Response model for scheduling."""
-    message: str
-    schedule_time: str
-
-# Store for schedule
-schedule_time = "09:00"  # Default schedule time
-
-def generate_dating_quote() -> str:
-    """Generate a dating quote using OpenAI API."""
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {API_KEY}"
-    }
-    
-    data = {
-        "model": MODEL,
-        "messages": [
-            {"role": "system", "content": "You are a helpful assistant specialized in creating inspirational and thoughtful dating quotes."},
-            {"role": "user", "content": "Generate a short inspirational quote about dating and relationships."}
-        ],
-        "max_tokens": 100
-    }
-    
-    try:
-        response = requests.post(OPENAI_ENDPOINT, headers=headers, json=data)
-        response.raise_for_status()
-        result = response.json()
-        quote = result["choices"][0]["message"]["content"].strip()
-        return quote
-    except Exception as e:
-        logger.error(f"Error generating quote: {str(e)}")
-        return "Love is a journey, not a destination."
-
-def create_notification():
-    """Create a new dating quote notification."""
-    quote = generate_dating_quote()
-    notification = {
-        "content": quote,
-        "created_at": datetime.now().isoformat()
-    }
-    notifications_store.append(notification)
-    logger.info(f"New notification created: {quote}")
+# Initialize API
+app = FastAPI(title="Dating Suggestion Quotes API")
 
 # Initialize scheduler
-scheduler = BackgroundScheduler()
+scheduler = AsyncIOScheduler()
 
-def update_scheduler():
-    """Update the scheduler with the current schedule time."""
-    # Remove all existing jobs
-    scheduler.remove_all_jobs()
-    
-    # Parse the schedule time
-    hour, minute = map(int, schedule_time.split(':'))
-    
-    # Add the job with the updated schedule
-    scheduler.add_job(
-        create_notification, 
-        'cron', 
-        hour=hour, 
-        minute=minute, 
-        id='daily_quote'
-    )
-    
-    logger.info(f"Scheduler updated: Daily notification at {schedule_time}")
+class Quote(BaseModel):
+    quote: str
+    timestamp: str
 
-# Routes
-@app.get("/")
-async def root():
-    """Root endpoint."""
-    return {"message": "Welcome to the Dating Quote Notification API"}
+quotes_history: List[Quote] = []
+
+async def generate_quote():
+    """Generate a dating suggestion quote using OpenAI."""
+    try:
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {API_KEY}"
+        }
+        
+        payload = {
+            "model": MODEL,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a dating coach specializing in creative date ideas. Provide a short, creative, and engaging dating suggestion. Keep it concise (maximum 2 sentences), romantic, and practical."
+                },
+                {
+                    "role": "user",
+                    "content": "Give me a fresh dating suggestion quote."
+                }
+            ],
+            "max_tokens": 100,
+            "temperature": 0.8
+        }
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(OPENAI_ENDPOINT, json=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+            quote = data["choices"][0]["message"]["content"].strip()
+            return quote
+            
+    except Exception as e:
+        print(f"Error generating quote: {str(e)}")
+        return "Try a sunset picnic with your favorite foods and a great view - simple but memorable."
+
+async def store_daily_quote():
+    """Generate a quote and store it in history."""
+    quote_text = await generate_quote()
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    quote = Quote(quote=quote_text, timestamp=timestamp)
+    quotes_history.append(quote)
+    
+    # Keep only the last 30 quotes
+    if len(quotes_history) > 30:
+        quotes_history.pop(0)
+    
+    print(f"Daily quote generated at {timestamp}: {quote_text}")
+    return quote
 
 @app.get("/quotes", response_model=List[Quote])
-async def get_quotes(api_key: str = Depends(verify_api_key)):
-    """Get all dating quotes."""
-    return notifications_store
+async def get_quotes():
+    """Get all stored quotes."""
+    return quotes_history
 
-@app.post("/quotes/generate", response_model=Quote)
-async def generate_quote(api_key: str = Depends(verify_api_key)):
-    """Generate a new dating quote on demand."""    
-    create_notification()
-    return notifications_store[-1]
+@app.get("/latest", response_model=Quote)
+async def get_latest_quote():
+    """Get the most recent quote."""
+    if not quotes_history:
+        quote_text = await generate_quote()
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        quote = Quote(quote=quote_text, timestamp=timestamp)
+        quotes_history.append(quote)
+    return quotes_history[-1]
 
-@app.post("/schedule", response_model=ScheduleResponse)
-async def set_schedule(schedule_data: Schedule, api_key: str = Depends(verify_api_key)):
-    """Set the schedule for daily notifications."""
-    global schedule_time
-    schedule_time = schedule_data.time
-    update_scheduler()
+@app.post("/schedule/{hour}/{minute}", status_code=201)
+async def set_schedule(hour: int, minute: int):
+    """Set the daily schedule for quote generation."""
+    # Remove existing jobs
+    scheduler.remove_all_jobs()
+    
+    # Add new job with specified time
+    scheduler.add_job(
+        store_daily_quote, 
+        CronTrigger(hour=hour, minute=minute),
+        id="daily_quote"
+    )
     
     return {
-        "message": "Schedule updated successfully",
-        "schedule_time": schedule_time
+        "message": f"Quote generation scheduled for {hour:02d}:{minute:02d} every day",
+        "schedule": f"{hour:02d}:{minute:02d}"
     }
 
-@app.get("/schedule", response_model=ScheduleResponse)
-async def get_schedule(api_key: str = Depends(verify_api_key)):
-    """Get the current schedule."""
+@app.get("/current-schedule")
+def get_schedule():
+    """Get the current schedule information."""
+    jobs = scheduler.get_jobs()
+    if not jobs:
+        return {"message": "No scheduled quote generation"}
+    
+    job = jobs[0]
+    next_run = job.next_run_time.strftime("%Y-%m-%d %H:%M:%S")
+    trigger = job.trigger
+    
+    schedule_info = {}
+    if hasattr(trigger, 'fields'):
+        for field in trigger.fields:
+            if field.name == 'hour':
+                schedule_info['hour'] = field.expressions[0]
+            elif field.name == 'minute':
+                schedule_info['minute'] = field.expressions[0]
+                
     return {
-        "message": "Current schedule",
-        "schedule_time": schedule_time
+        "next_run": next_run,
+        "schedule": f"{schedule_info.get('hour', '00')}:{schedule_info.get('minute', '00')}"
     }
 
-# Startup and shutdown events
+@app.post("/generate-now", response_model=Quote)
+async def generate_now():
+    """Manually generate a quote now."""
+    return await store_daily_quote()
+
 @app.on_event("startup")
 async def startup_event():
-    """Execute on application startup."""
-    # Create initial quote
-    create_notification()
-    
-    # Initialize the scheduler
-    update_scheduler()
-    
-    # Start the scheduler
-    if not scheduler.running:
-        scheduler.start()
-    
-    logger.info("Application started successfully")
+    # Default schedule: 9:00 AM daily
+    scheduler.add_job(
+        store_daily_quote, 
+        CronTrigger(hour=9, minute=0),
+        id="daily_quote"
+    )
+    scheduler.start()
+    print("Application started. Quote generation scheduler is running.")
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Execute on application shutdown."""
-    # Shutdown the scheduler
-    if scheduler.running:
-        scheduler.shutdown()
-    
-    logger.info("Application shutdown complete")
+    scheduler.shutdown()
 
-# Run the app
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
