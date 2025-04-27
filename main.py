@@ -30,12 +30,26 @@ class Quote(BaseModel):
 quotes_history: List[Quote] = []
 
 async def generate_quote():
-    """Generate a dating suggestion quote using OpenAI."""
+    """Generate a random dating suggestion quote using OpenAI."""
     try:
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {API_KEY}"
         }
+        
+        # List of different prompts to get more diverse quotes
+        prompts = [
+            "Give me a creative and unique dating suggestion that's not commonly mentioned.",
+            "Suggest an unusual but fun dating activity that creates memorable moments.",
+            "What's a romantic dating idea that doesn't cost much money?",
+            "Share a dating suggestion that involves nature or outdoors.",
+            "Provide a dating tip for couples looking to spice up their relationship.",
+            "What's a good first date idea that helps people connect genuinely?",
+            "Suggest a date activity that involves learning something new together."
+        ]
+        
+        import random
+        selected_prompt = random.choice(prompts)
         
         payload = {
             "model": MODEL,
@@ -46,11 +60,13 @@ async def generate_quote():
                 },
                 {
                     "role": "user",
-                    "content": "Give me a fresh dating suggestion quote."
+                    "content": selected_prompt
                 }
             ],
             "max_tokens": 100,
-            "temperature": 0.8
+            "temperature": 0.9,  # Increased for more randomness
+            "presence_penalty": 0.6,  # Encourages the model to talk about new topics
+            "frequency_penalty": 0.6  # Discourages repetition of the same phrases
         }
         
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -62,7 +78,15 @@ async def generate_quote():
             
     except Exception as e:
         print(f"Error generating quote: {str(e)}")
-        return "Try a sunset picnic with your favorite foods and a great view - simple but memorable."
+        # Fallback quotes if the API call fails
+        fallback_quotes = [
+            "Try a sunset picnic with your favorite foods and a great view - simple but memorable.",
+            "Cook a meal together where each person is responsible for different courses - it's collaborative and revealing.",
+            "Explore a museum after hours during special evening events for a unique and intimate experience.",
+            "Take a dance class together - the physical connection and shared learning create instant chemistry.",
+            "Go stargazing in a remote location with hot chocolate and cozy blankets for meaningful conversation."
+        ]
+        return random.choice(fallback_quotes)
 
 async def store_daily_quote():
     """Generate a quote and store it in history."""
